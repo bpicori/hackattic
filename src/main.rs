@@ -1,5 +1,5 @@
 mod challenges;
 
 fn main() {
-    challenges::password_hashing::run();
+    challenges::help_me_unpack::run();
 }
