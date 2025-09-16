@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-base64="0.22.1"
-sha2="0.10.9"
-pbkdf2="0.12.2"
-hex="0.4.3"
-scrypt="0.11"
-hmac="0.12.1"
+base64 = "0.22.1"
+sha2 = "0.10.9"
+pbkdf2 = "0.12.2"
+hex = "0.4.3"
+scrypt = "0.11"
+hmac = "0.12.1"
+flate2 = "1.1.2"
+regex = "1.10.3"
+reqwest = { version = "0.12.23", features = ["blocking", "json"] }
+serde_json = { version = "1.0.145" }
