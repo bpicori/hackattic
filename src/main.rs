@@ -1,5 +1,5 @@
 mod challenges;
 
 fn main() {
-    challenges::backup_restore::run();
+    challenges::brute_force_zip::run();
 }
