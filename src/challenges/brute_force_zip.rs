@@ -94,8 +94,13 @@ fn read_eocd(bytes: &Vec<u8>) -> Option<EndOfCentralDirectory> {
 /// | Offset | Size | Field                   | Notes                            
 /// |--------|------|-------------------------| ---------------------------------
 /// | 0      | 4    | Signature (0x02014b50)  |
+/// | 4      | 2    | Version made by         |
+/// | 6      | 2    | Version needed to extract |
 /// | 8      | 2    | General purpose flag     | check if encrypted or not
 /// | 10     | 2    | Compression method      | 0 -> no_compression, 8 -> deflate
+/// | 12     | 2    | Last mod file time       |
+/// | 14     | 2    | Last mod file date       |
+/// | 16     | 4    | CRC-32                  
 /// | 20     | 4    | Compressed size         |
 /// | 24     | 4    | Uncompressed size       |
 /// | 28     | 2    | Filename length (n)     |
@@ -115,6 +120,8 @@ struct CentralDirectoryEntry {
     general_purpose_flag: u16,
     /// 2 bytes @ offset 10
     compression_method: u16,
+    /// 2 bytes @ offset 10
+    last_mod_time: u16,
     /// 2 bytes @ offset 16
     crc32: u32,
     /// 4 bytes @ offset 20
@@ -135,6 +142,8 @@ fn read_central_directory_entry(bytes: &[u8], offset: usize) -> (CentralDirector
 
     let compression_method =
         u16::from_le_bytes(bytes[offset + 10..offset + 12].try_into().unwrap());
+
+    let last_mod_time = u16::from_le_bytes(bytes[offset + 12..offset + 14].try_into().unwrap());
 
     let crc32 = u32::from_le_bytes(bytes[offset + 16..offset + 20].try_into().unwrap());
 
@@ -161,6 +170,7 @@ fn read_central_directory_entry(bytes: &[u8], offset: usize) -> (CentralDirector
         CentralDirectoryEntry {
             filename,
             general_purpose_flag,
+            last_mod_time,
             crc32,
             compression_method,
             compressed_size,
@@ -201,25 +211,13 @@ fn extract_all_files(bytes: &[u8], eocd: &EndOfCentralDirectory) {
             println!("compression method {:?}", entry.compression_method);
             println!("compressed: {:?}", entry.compressed_size);
             println!("uncompressed: {:?}", entry.uncompressed_size);
-
             println!("crc32: {:?}", entry.crc32);
 
             let enc_header = &file_data[..12];
             let password = "a";
-            let valid = verify_zip_crypto_password(enc_header, password, entry.crc32);
+            let valid = verify_zip_crypto_password(enc_header, password, entry.last_mod_time);
 
             println!("is_valid: {:?}", valid);
-
-            let cursor = Cursor::new(&bytes);
-            let mut archive = ZipArchive::new(cursor).unwrap();
-
-            // Find the entry
-            let res = archive.by_name_decrypt("secret.txt", b"a").unwrap();
-            match res {
-                Ok(_) => println!("Correct"),
-                Err(_) => println!("NOPE!!"),
-            }
-
             println!(
                 "File: {:?}, Content: {:?}",
                 entry.filename,
@@ -239,7 +237,7 @@ fn is_encrypted(general_purpose_flag: u16) -> bool {
     return (general_purpose_flag & 0x0001) != 0;
 }
 
-fn verify_zip_crypto_password(enc_header: &[u8], password: &str, expected_crc32: u32) -> bool {
+fn verify_zip_crypto_password(enc_header: &[u8], password: &str, mod_time: u16) -> bool {
     if enc_header.len() < ZIP_CRYPTO_HEADER_SIZE {
         return false;
     }
@@ -287,9 +285,9 @@ fn verify_zip_crypto_password(enc_header: &[u8], password: &str, expected_crc32:
         update_keys(&mut keys, decrypted[i]);
     }
 
-    // Check byte: last byte of decrypted header should equal high byte of CRC32
+    // Check byte: last byte of decrypted header should equal high byte of modification time
     let check_byte = decrypted[11];
-    let expected_check = (expected_crc32 >> 24) as u8;
+    let expected_check = (mod_time >> 8) as u8;
 
     return check_byte == expected_check;
 }
