@@ -213,11 +213,20 @@ fn extract_all_files(bytes: &[u8], eocd: &EndOfCentralDirectory) {
             println!("uncompressed: {:?}", entry.uncompressed_size);
             println!("crc32: {:?}", entry.crc32);
 
-            let enc_header = &file_data[..12];
-            let password = "a";
-            let valid = verify_zip_crypto_password(enc_header, password, entry.last_mod_time);
 
-            println!("is_valid: {:?}", valid);
+            let charset: Vec<char> = ('a'..='z').chain('0'..='9').collect();
+            let mut prefix = String::new();
+            for length in 4..6 {
+                // Start with shorter lengths first
+                generate_passwords(
+                    &charset,
+                    length,
+                    &mut prefix,
+                    file_data,   // Use full encrypted data
+                    entry.crc32, // Use CRC32 for validation
+                );
+            }
+
             println!(
                 "File: {:?}, Content: {:?}",
                 entry.filename,
@@ -237,17 +246,14 @@ fn is_encrypted(general_purpose_flag: u16) -> bool {
     return (general_purpose_flag & 0x0001) != 0;
 }
 
-fn verify_zip_crypto_password(enc_header: &[u8], password: &str, mod_time: u16) -> bool {
-    if enc_header.len() < ZIP_CRYPTO_HEADER_SIZE {
+fn verify_zip_crypto_password(enc_data: &[u8], password: &str, expected_crc32: u32) -> bool {
+    if enc_data.len() < ZIP_CRYPTO_HEADER_SIZE {
         return false;
     }
 
     // Initialize ZipCrypto keys
     let mut keys = (0x12345678, 0x23456789, 0x34567890);
 
-    // PART OF ZIPCRYPTO ALGO
-    //This function updates a CRC32 checksum for a single byte of data.
-    // It performs bitwise operations on the current CRC value and the new byte
     fn crc32_update(mut crc: u32, byte: u8) -> u32 {
         crc ^= byte as u32;
         for _ in 0..8 {
@@ -259,7 +265,7 @@ fn verify_zip_crypto_password(enc_header: &[u8], password: &str, mod_time: u16) 
         }
         crc
     }
-    // PART OF ZIPCRYPTO ALGO
+
     fn update_keys(keys: &mut (u32, u32, u32), byte: u8) {
         keys.0 = crc32_update(keys.0, byte);
         keys.1 = keys.1.wrapping_add(keys.0 & 0xff);
@@ -267,7 +273,6 @@ fn verify_zip_crypto_password(enc_header: &[u8], password: &str, mod_time: u16) 
         keys.2 = crc32_update(keys.2, (keys.1 >> 24) as u8);
     }
 
-    // PART OF ZIPCRYPTO ALGO
     fn decrypt_byte(keys: &(u32, u32, u32)) -> u8 {
         let temp = keys.2 | 2;
         (((temp.wrapping_mul(temp ^ 1)) >> 8) & 0xff) as u8
@@ -278,22 +283,52 @@ fn verify_zip_crypto_password(enc_header: &[u8], password: &str, mod_time: u16) 
         update_keys(&mut keys, byte);
     }
 
-    let mut decrypted = [0u8; ZIP_CRYPTO_HEADER_SIZE];
-    for i in 0..ZIP_CRYPTO_HEADER_SIZE {
+    // Decrypt all data
+    let mut decrypted = vec![0u8; enc_data.len()];
+    for i in 0..enc_data.len() {
         let k = decrypt_byte(&keys);
-        decrypted[i] = enc_header[i] ^ k;
+        decrypted[i] = enc_data[i] ^ k;
         update_keys(&mut keys, decrypted[i]);
     }
 
-    // Check byte: last byte of decrypted header should equal high byte of modification time
-    let check_byte = decrypted[11];
-    let expected_check = (mod_time >> 8) as u8;
+    // Skip the 12-byte header and calculate CRC32 of the actual file content
+    let file_content = &decrypted[ZIP_CRYPTO_HEADER_SIZE..];
 
-    return check_byte == expected_check;
+    // Calculate CRC32 of decrypted content
+    let mut crc = 0xFFFFFFFFu32;
+    for &byte in file_content {
+        crc = crc32_update(crc, byte);
+    }
+    crc ^= 0xFFFFFFFF;
+
+    // Check if CRC32 matches
+    crc == expected_crc32
+}
+
+fn generate_passwords(
+    charset: &[char],
+    length: usize,
+    prefix: &mut String,
+    enc_data: &[u8],
+    expected_crc32: u32,
+) {
+    if prefix.len() == length {
+        println!("Checking password: {}", prefix);
+        if verify_zip_crypto_password(enc_data, prefix, expected_crc32) {
+            panic!("Found password: {}", prefix);
+        }
+        return;
+    }
+
+    for &c in charset {
+        prefix.push(c);
+        generate_passwords(charset, length, prefix, enc_data, expected_crc32);
+        prefix.pop(); // Backtrack
+    }
 }
 
 pub fn run() {
-    let file = fs::read("data/encrypted.zip").unwrap();
+    let file = fs::read("data/package.zip").unwrap();
     let is_zip = check_if_zip(&file);
     if !is_zip {
         panic!("The file provided is not a zip file");
@@ -301,6 +336,8 @@ pub fn run() {
 
     let eocd = read_eocd(&file).unwrap();
     println!("{:?}", eocd);
+    let charset: Vec<char> = ('a'..='z').chain('0'..='9').collect();
+    println!("charset: {:?}", charset);
 
     extract_all_files(&file, &eocd);
 }
