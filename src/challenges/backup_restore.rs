@@ -5,13 +5,12 @@ use flate2::read::GzDecoder;
 use regex::Regex;
 use serde_json::json;
 
-const GET_URL: &str =
-    "https://hackattic.com/challenges/backup_restore/problem?access_token=a6af29a286fe2625";
-const POST_URL: &str =
-    "https://hackattic.com/challenges/backup_restore/solve?access_token=a6af29a286fe2625";
-
 pub fn run() {
-    let b64 = get_dump();
+    let client = crate::utils::hackattic_client::HackatticClient::new("backup_restore");
+
+    let problem = client.get_problem();
+    let b64 = problem["dump"].as_str().unwrap();
+
     let buf = general_purpose::STANDARD
         .decode(b64)
         .expect("expect base64");
@@ -33,31 +32,9 @@ pub fn run() {
         }
     }
 
-    post_response(socials);
-}
-
-fn get_dump() -> String {
-    let resp = reqwest::blocking::get(GET_URL)
-        .expect("failed to fetch")
-        .json::<serde_json::Value>()
-        .expect("failed to parse json");
-
-    resp["dump"].as_str().unwrap().to_string()
-}
-
-fn post_response(socials: Vec<String>) {
-    let body = json!({
-      "alive_ssns": socials
+    let solution = json!({
+        "alive_ssns": socials
     });
 
-    let resp = reqwest::blocking::Client::new()
-        .post(POST_URL)
-        .json(&body)
-        .send()
-        .expect("Failed to send POST");
-
-    let status = resp.status();
-    let text = resp.text().expect("Failed to read response body");
-    println!("Status: {}", status);
-    println!("Body: {}", text);
+    client.submit_solution(solution);
 }

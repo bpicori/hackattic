@@ -1,5 +1,5 @@
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use std::fs;
+use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -27,11 +27,20 @@ fn format_rate(rate: f64) -> String {
 }
 
 pub fn run() {
-    let file = fs::read("data/package.zip").unwrap();
+    let client = crate::utils::hackattic_client::HackatticClient::new("brute_force_zip");
+
+    println!("Getting ZIP file URL from Hackattic API...");
+    let problem = client.get_problem();
+    let zip_url = problem["zip_url"].as_str().unwrap();
+    println!("ZIP URL: {}", zip_url);
+
+    println!("Downloading ZIP file...");
+    let file = client.download_file(zip_url);
     let is_zip = crate::utils::zip::check_if_zip(&file);
     if !is_zip {
-        panic!("The file provided is not a zip file");
+        panic!("The downloaded file is not a ZIP file");
     }
+    println!("ZIP file downloaded successfully ({} bytes)", file.len());
 
     let charset: Vec<char> = ('a'..='z').chain('0'..='9').collect();
 
@@ -246,7 +255,14 @@ pub fn run() {
             if !content.is_empty() {
                 println!("Decrypted content:");
                 match String::from_utf8(content.clone()) {
-                    Ok(text) => println!("{}", text),
+                    Ok(text) => {
+                        println!("{}", text);
+                        println!("Submitting solution to Hackattic API...");
+                        let solution = json!({
+                            "secret": text.trim()
+                        });
+                        client.submit_solution(solution);
+                    }
                     Err(_) => {
                         panic!("Failed to decode decrypted content as UTF-8");
                     }
