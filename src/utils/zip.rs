@@ -28,6 +28,7 @@ const ZIP_CRYPTO_HEADER_SIZE: usize = 12;
 /// |--------|------|------------------------|
 ///
 #[derive(Debug)]
+#[allow(dead_code)]
 struct EndOfCentralDirectory {
     /// 2 bytes @ offset 4
     disk_number: u16,
@@ -109,6 +110,7 @@ fn read_eocd(bytes: &[u8]) -> EndOfCentralDirectory {
 /// |--------|------|-------------------------|
 ///
 #[derive(Debug)]
+#[allow(dead_code)]
 struct CentralDirectoryEntry {
     /// File name
     filename: String,
@@ -194,6 +196,7 @@ fn read_file_content<'a>(bytes: &'a [u8], cde: &'a CentralDirectoryEntry) -> &'a
 }
 
 // Check if the file is encrypted
+#[allow(dead_code)]
 pub fn is_encrypted(general_purpose_flag: u16) -> bool {
     return (general_purpose_flag & 0x0001) != 0;
 }
@@ -245,23 +248,22 @@ pub fn verify_zip_crypto_password(
         update_keys(&mut keys, byte);
     }
 
-    // Decrypt all data
-    let mut decrypted = vec![0u8; encrypted_data.len()];
-    for i in 0..encrypted_data.len() {
+    // Decrypt and discard the 12-byte header while updating keys (no allocation)
+    for i in 0..ZIP_CRYPTO_HEADER_SIZE {
         let k = decrypt_byte(&keys);
-        decrypted[i] = encrypted_data[i] ^ k;
-        update_keys(&mut keys, decrypted[i]);
+        let plain = encrypted_data[i] ^ k;
+        update_keys(&mut keys, plain);
     }
 
-    // Skip the 12-byte header and calculate CRC32 of the actual file content
-    let file_content = &decrypted[ZIP_CRYPTO_HEADER_SIZE..];
-
-    // Calculate CRC32 of decrypted content
-    let mut crc = 0xFFFFFFFFu32;
-    for &byte in file_content {
-        crc = crc32_update(crc, byte);
+    // Stream-decrypt the rest and compute CRC32 without allocating a buffer
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in &encrypted_data[ZIP_CRYPTO_HEADER_SIZE..] {
+        let k = decrypt_byte(&keys);
+        let plain = b ^ k;
+        update_keys(&mut keys, plain);
+        crc = crc32_update(crc, plain);
     }
-    crc ^= 0xFFFFFFFF;
+    crc ^= 0xFFFF_FFFF;
 
     // Check if CRC32 matches
     crc == expected_crc32
