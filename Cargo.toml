@@ -16,4 +16,4 @@ reqwest = { version = "0.12.23", features = ["blocking", "json"] }
 serde_json = { version = "1.0.145" }
 crossbeam-channel = "0.5.15"
 num_cpus = "1.13"
-
+ctrlc = "3.4"
