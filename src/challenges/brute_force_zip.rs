@@ -1,7 +1,7 @@
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::fs;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,10 @@ pub fn run() {
     let shutdown_signal = Arc::new(AtomicBool::new(false));
     let shutdown_signal_clone = Arc::clone(&shutdown_signal);
     let start_time = Instant::now();
+
+    // Shared state for storing the found password and decrypted content
+    let found_password = Arc::new(Mutex::new(String::new()));
+    let decrypted_content = Arc::new(Mutex::new(Vec::<u8>::new()));
 
     // Set up Ctrl+C handler
     ctrlc::set_handler(move || {
@@ -147,6 +151,7 @@ pub fn run() {
                     break; // finished all passwords of this length
                 }
             }
+            println!("Finished generating passwords of length {}", length);
         }
         // Dropping the sender signals that no more messages will be sent.
         drop(tx_main);
@@ -163,6 +168,8 @@ pub fn run() {
         let counter_worker = Arc::clone(&password_counter);
         let found_flag_worker = Arc::clone(&password_found);
         let shutdown_signal_worker = Arc::clone(&shutdown_signal);
+        let found_password_worker = Arc::clone(&found_password);
+        let decrypted_content_worker = Arc::clone(&decrypted_content);
         let handle = thread::spawn(move || {
             println!("Worker {} started.", i);
             // The loop will automatically break when the sender is dropped and the channel is empty.
@@ -183,6 +190,19 @@ pub fn run() {
 
                 if crate::utils::zip::verify_zip_crypto_password(&content, &password, crc32) {
                     println!("Found password: {}", password);
+
+                    // Decrypt the file content
+                    let decrypted =
+                        crate::utils::zip::decrypt_zip_crypto_content(&content, &password);
+
+                    // Store the password and decrypted content
+                    if let Ok(mut pwd) = found_password_worker.lock() {
+                        *pwd = password.clone();
+                    }
+                    if let Ok(mut content_guard) = decrypted_content_worker.lock() {
+                        *content_guard = decrypted;
+                    }
+
                     found_flag_worker.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -214,6 +234,25 @@ pub fn run() {
         println!("Program was interrupted by user (Ctrl+C).");
     } else if was_found {
         println!("Password was found successfully!");
+
+        // Print the found password and decrypted content
+        if let Ok(pwd) = found_password.lock() {
+            if !pwd.is_empty() {
+                println!("Password: {}", pwd);
+            }
+        }
+
+        if let Ok(content) = decrypted_content.lock() {
+            if !content.is_empty() {
+                println!("Decrypted content:");
+                match String::from_utf8(content.clone()) {
+                    Ok(text) => println!("{}", text),
+                    Err(_) => {
+                        panic!("Failed to decode decrypted content as UTF-8");
+                    }
+                }
+            }
+        }
     } else {
         println!("Search completed without finding password.");
     }

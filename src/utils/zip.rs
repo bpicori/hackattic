@@ -206,6 +206,57 @@ pub fn check_if_zip(bytes: &Vec<u8>) -> bool {
     return &bytes[0..4] == ZIP_FILE_SIGNATURE;
 }
 
+// Helper functions for ZipCrypto algorithm
+fn crc32_update(mut crc: u32, byte: u8) -> u32 {
+    crc ^= byte as u32;
+    for _ in 0..8 {
+        if crc & 1 != 0 {
+            crc = (crc >> 1) ^ 0xEDB88320;
+        } else {
+            crc >>= 1;
+        }
+    }
+    crc
+}
+
+fn update_keys(keys: &mut (u32, u32, u32), byte: u8) {
+    keys.0 = crc32_update(keys.0, byte);
+    keys.1 = keys.1.wrapping_add(keys.0 & 0xff);
+    keys.1 = keys.1.wrapping_mul(134775813).wrapping_add(1);
+    keys.2 = crc32_update(keys.2, (keys.1 >> 24) as u8);
+}
+
+fn decrypt_byte(keys: &(u32, u32, u32)) -> u8 {
+    let temp = keys.2 | 2;
+    (((temp.wrapping_mul(temp ^ 1)) >> 8) & 0xff) as u8
+}
+
+// Decrypt ZIP content using ZipCrypto algorithm and return the file content
+pub fn decrypt_zip_crypto_content(encrypted_data: &[u8], password: &str) -> Vec<u8> {
+    if encrypted_data.len() < ZIP_CRYPTO_HEADER_SIZE {
+        return Vec::new();
+    }
+
+    // Initialize ZipCrypto keys
+    let mut keys = (0x12345678, 0x23456789, 0x34567890);
+
+    // Initialize keys with password
+    for byte in password.bytes() {
+        update_keys(&mut keys, byte);
+    }
+
+    // Decrypt all data
+    let mut decrypted = vec![0u8; encrypted_data.len()];
+    for i in 0..encrypted_data.len() {
+        let k = decrypt_byte(&keys);
+        decrypted[i] = encrypted_data[i] ^ k;
+        update_keys(&mut keys, decrypted[i]);
+    }
+
+    // Skip the 12-byte header and return the actual file content
+    decrypted[ZIP_CRYPTO_HEADER_SIZE..].to_vec()
+}
+
 // Verify the password for a zip file, using the ZipCrypto algorithm
 pub fn verify_zip_crypto_password(
     encrypted_data: &[u8],
@@ -218,30 +269,6 @@ pub fn verify_zip_crypto_password(
 
     // Initialize ZipCrypto keys
     let mut keys = (0x12345678, 0x23456789, 0x34567890);
-
-    fn crc32_update(mut crc: u32, byte: u8) -> u32 {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-        crc
-    }
-
-    fn update_keys(keys: &mut (u32, u32, u32), byte: u8) {
-        keys.0 = crc32_update(keys.0, byte);
-        keys.1 = keys.1.wrapping_add(keys.0 & 0xff);
-        keys.1 = keys.1.wrapping_mul(134775813).wrapping_add(1);
-        keys.2 = crc32_update(keys.2, (keys.1 >> 24) as u8);
-    }
-
-    fn decrypt_byte(keys: &(u32, u32, u32)) -> u8 {
-        let temp = keys.2 | 2;
-        (((temp.wrapping_mul(temp ^ 1)) >> 8) & 0xff) as u8
-    }
 
     // Initialize keys with password
     for byte in password.bytes() {
