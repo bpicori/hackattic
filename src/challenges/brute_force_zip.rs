@@ -3,7 +3,7 @@ use std::fs;
 use std::thread;
 
 pub fn run() {
-    let file = fs::read("data/package.zip").unwrap();
+    let file = fs::read("data/package_1.zip").unwrap();
     let is_zip = crate::utils::zip::check_if_zip(&file);
     if !is_zip {
         panic!("The file provided is not a zip file");
@@ -52,7 +52,8 @@ pub fn run() {
     });
 
     let mut handles = vec![];
-    let num_workers = 6;
+    let num_workers = num_cpus::get() - 1;
+
 
     // Spawn 8 worker threads
     for i in 0..num_workers {

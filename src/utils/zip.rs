@@ -1,34 +1,6 @@
-use std::sync::OnceLock;
-
 const ZIP_FILE_SIGNATURE: &[u8; 4] = b"PK\x03\x04";
 const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
 const ZIP_CRYPTO_HEADER_SIZE: usize = 12;
-
-static CRC32_TABLE: OnceLock<[u32; 256]> = OnceLock::new();
-
-fn get_crc32_table() -> &'static [u32; 256] {
-    CRC32_TABLE.get_or_init(|| {
-        let mut t = [0u32; 256];
-        for i in 0..256 {
-            let mut crc = i as u32;
-            for _ in 0..8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ 0xEDB88320;
-                } else {
-                    crc >>= 1;
-                }
-            }
-            t[i] = crc;
-        }
-        t
-    })
-}
-
-#[inline]
-fn crc32_update_table(crc: u32, byte: u8) -> u32 {
-    let t = get_crc32_table();
-    t[((crc ^ (byte as u32)) & 0xFF) as usize] ^ (crc >> 8)
-}
 
 // ZIP Layout
 // [Local File Header 1][File Data 1][Data Descriptor?]
@@ -116,7 +88,7 @@ fn read_eocd(bytes: &[u8]) -> EndOfCentralDirectory {
 /// Represents a single file entry in the Central Directory
 ///
 ///
-/// | Offset | Size | Field                   | Notes
+/// | Offset | Size | Field                   | Notes                            
 /// |--------|------|-------------------------| ---------------------------------
 /// | 0      | 4    | Signature (0x02014b50)  |
 /// | 4      | 2    | Version made by         |
@@ -247,8 +219,16 @@ pub fn verify_zip_crypto_password(
     // Initialize ZipCrypto keys
     let mut keys = (0x12345678, 0x23456789, 0x34567890);
 
-    fn crc32_update(crc: u32, byte: u8) -> u32 {
-        crc32_update_table(crc, byte)
+    fn crc32_update(mut crc: u32, byte: u8) -> u32 {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+        crc
     }
 
     fn update_keys(keys: &mut (u32, u32, u32), byte: u8) {
