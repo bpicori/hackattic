@@ -1,6 +1,34 @@
+use std::sync::OnceLock;
+
 const ZIP_FILE_SIGNATURE: &[u8; 4] = b"PK\x03\x04";
 const EOCD_SIGNATURE: &[u8; 4] = b"PK\x05\x06";
 const ZIP_CRYPTO_HEADER_SIZE: usize = 12;
+
+static CRC32_TABLE: OnceLock<[u32; 256]> = OnceLock::new();
+
+fn get_crc32_table() -> &'static [u32; 256] {
+    CRC32_TABLE.get_or_init(|| {
+        let mut t = [0u32; 256];
+        for i in 0..256 {
+            let mut crc = i as u32;
+            for _ in 0..8 {
+                if (crc & 1) != 0 {
+                    crc = (crc >> 1) ^ 0xEDB88320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+            t[i] = crc;
+        }
+        t
+    })
+}
+
+#[inline]
+fn crc32_update_table(crc: u32, byte: u8) -> u32 {
+    let t = get_crc32_table();
+    t[((crc ^ (byte as u32)) & 0xFF) as usize] ^ (crc >> 8)
+}
 
 // ZIP Layout
 // [Local File Header 1][File Data 1][Data Descriptor?]
@@ -88,7 +116,7 @@ fn read_eocd(bytes: &[u8]) -> EndOfCentralDirectory {
 /// Represents a single file entry in the Central Directory
 ///
 ///
-/// | Offset | Size | Field                   | Notes                            
+/// | Offset | Size | Field                   | Notes
 /// |--------|------|-------------------------| ---------------------------------
 /// | 0      | 4    | Signature (0x02014b50)  |
 /// | 4      | 2    | Version made by         |
@@ -219,16 +247,8 @@ pub fn verify_zip_crypto_password(
     // Initialize ZipCrypto keys
     let mut keys = (0x12345678, 0x23456789, 0x34567890);
 
-    fn crc32_update(mut crc: u32, byte: u8) -> u32 {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-        crc
+    fn crc32_update(crc: u32, byte: u8) -> u32 {
+        crc32_update_table(crc, byte)
     }
 
     fn update_keys(keys: &mut (u32, u32, u32), byte: u8) {
@@ -248,22 +268,23 @@ pub fn verify_zip_crypto_password(
         update_keys(&mut keys, byte);
     }
 
-    // Decrypt and discard the 12-byte header while updating keys (no allocation)
-    for i in 0..ZIP_CRYPTO_HEADER_SIZE {
+    // Decrypt all data
+    let mut decrypted = vec![0u8; encrypted_data.len()];
+    for i in 0..encrypted_data.len() {
         let k = decrypt_byte(&keys);
-        let plain = encrypted_data[i] ^ k;
-        update_keys(&mut keys, plain);
+        decrypted[i] = encrypted_data[i] ^ k;
+        update_keys(&mut keys, decrypted[i]);
     }
 
-    // Stream-decrypt the rest and compute CRC32 without allocating a buffer
-    let mut crc = 0xFFFF_FFFFu32;
-    for &b in &encrypted_data[ZIP_CRYPTO_HEADER_SIZE..] {
-        let k = decrypt_byte(&keys);
-        let plain = b ^ k;
-        update_keys(&mut keys, plain);
-        crc = crc32_update(crc, plain);
+    // Skip the 12-byte header and calculate CRC32 of the actual file content
+    let file_content = &decrypted[ZIP_CRYPTO_HEADER_SIZE..];
+
+    // Calculate CRC32 of decrypted content
+    let mut crc = 0xFFFFFFFFu32;
+    for &byte in file_content {
+        crc = crc32_update(crc, byte);
     }
-    crc ^= 0xFFFF_FFFF;
+    crc ^= 0xFFFFFFFF;
 
     // Check if CRC32 matches
     crc == expected_crc32
