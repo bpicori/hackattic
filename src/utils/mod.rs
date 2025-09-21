@@ -1,1 +1,1 @@
-mod zip;
+pub mod zip;

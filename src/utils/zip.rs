@@ -48,7 +48,7 @@ struct EndOfCentralDirectory {
 }
 
 // Reads the End of Central Directory (EOCD) record from a ZIP file
-fn read_eocd(bytes: &Vec<u8>) -> EndOfCentralDirectory {
+fn read_eocd(bytes: &[u8]) -> EndOfCentralDirectory {
     let mut pos = 0;
     let mut i = bytes.len().saturating_sub(4);
 
@@ -179,7 +179,7 @@ fn read_central_directory_entry(bytes: &[u8], offset: usize) -> (CentralDirector
 }
 
 // Read the file content
-fn read_file_content(bytes: &[u8], cde: &CentralDirectoryEntry) -> [u8] {
+fn read_file_content<'a>(bytes: &'a [u8], cde: &'a CentralDirectoryEntry) -> &'a [u8] {
     let offset = cde.local_header_offset as usize;
 
     let filename_len =
@@ -193,18 +193,22 @@ fn read_file_content(bytes: &[u8], cde: &CentralDirectoryEntry) -> [u8] {
     return &bytes[data_start..data_end];
 }
 
-// Check if the file is a zip file
-fn check_if_zip(bytes: &Vec<u8>) -> bool {
-    return &bytes[0..4] == ZIP_FILE_SIGNATURE;
-}
-
 // Check if the file is encrypted
-fn is_encrypted(general_purpose_flag: u16) -> bool {
+pub fn is_encrypted(general_purpose_flag: u16) -> bool {
     return (general_purpose_flag & 0x0001) != 0;
 }
 
+// Check if the file is a zip file
+pub fn check_if_zip(bytes: &Vec<u8>) -> bool {
+    return &bytes[0..4] == ZIP_FILE_SIGNATURE;
+}
+
 // Verify the password for a zip file, using the ZipCrypto algorithm
-fn verify_zip_crypto_password(encrypted_data: &[u8], password: &str, expected_crc32: u32) -> bool {
+pub fn verify_zip_crypto_password(
+    encrypted_data: &[u8],
+    password: &str,
+    expected_crc32: u32,
+) -> bool {
     if encrypted_data.len() < ZIP_CRYPTO_HEADER_SIZE {
         return false;
     }
@@ -263,17 +267,19 @@ fn verify_zip_crypto_password(encrypted_data: &[u8], password: &str, expected_cr
     crc == expected_crc32
 }
 
-// Extract all files from the zip file, and return a vector of (filename, content)
+// Extract all files from the zip file, and return a vector of (filename, content, crc32)
 // If a file is encrypted, it will be returned as is
-fn extract_all_files(bytes: &[u8], eocd: &EndOfCentralDirectory) -> Vec<(String, Vec<u8>)> {
+pub fn extract_all_files(bytes: &[u8]) -> Vec<(String, Vec<u8>, u32)> {
+    let eocd = read_eocd(&bytes);
     let mut offset = eocd.central_directory_offset as usize;
-    let result = Vec::new();
+    let mut result = Vec::new();
 
     for _ in 0..eocd.total_entries {
         let (entry, next_offset) = read_central_directory_entry(&bytes, offset);
-        let file_content = read_file_content(&bytes, &entry);
+        let filename = entry.filename.clone();
+        let file_content = read_file_content(&bytes, &entry).to_vec();
 
-        result.push((entry.filename, file_content));
+        result.push((filename, file_content, entry.crc32));
 
         offset = next_offset
     }
