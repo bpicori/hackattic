@@ -9,6 +9,7 @@ fn main() {
         "help_me_unpack" => challenges::help_me_unpack::run(),
         "backup_restore" => challenges::backup_restore::run(),
         "brute_force_zip" => challenges::brute_force_zip::run(),
+        "mini_miner" => challenges::mini_miner::run(),
         _ => panic!("Unknown challenge"),
     }
 }
