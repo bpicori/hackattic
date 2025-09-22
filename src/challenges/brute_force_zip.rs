@@ -26,6 +26,109 @@ fn format_rate(rate: f64) -> String {
     }
 }
 
+fn spawn_password_generator(
+    charset: Vec<char>,
+    tx_main: Sender<String>,
+    password_found: Arc<AtomicBool>,
+    shutdown_signal: Arc<AtomicBool>,
+) {
+    let found_flag_producer = Arc::clone(&password_found);
+    let shutdown_signal_producer = Arc::clone(&shutdown_signal);
+    thread::spawn(move || {
+        println!("Password generator thread started.");
+        for length in 4..=6 {
+            println!("Generating passwords of length {}", length);
+            let mut indices = vec![0; length];
+
+            loop {
+                // Check if password was found or shutdown signal received
+                if found_flag_producer.load(Ordering::Relaxed)
+                    || shutdown_signal_producer.load(Ordering::Relaxed)
+                {
+                    println!("Stopping generator (password found or shutdown signal received).");
+                    break;
+                }
+
+                let password: String = indices.iter().map(|&i| charset[i]).collect();
+                // Send password to main thread
+                if tx_main.send(password.clone()).is_err() {
+                    // Channel closed, workers are done
+                    break;
+                }
+
+                // Increment indices (like base-36 counter)
+                let mut pos = length as isize - 1;
+                while pos >= 0 {
+                    indices[pos as usize] += 1;
+                    if indices[pos as usize] < charset.len() {
+                        break;
+                    }
+                    indices[pos as usize] = 0;
+                    pos -= 1;
+                }
+                if pos < 0 {
+                    break; // finished all passwords of this length
+                }
+            }
+            println!("Finished generating passwords of length {}", length);
+        }
+        // Dropping the sender signals that no more messages will be sent.
+        drop(tx_main);
+    });
+}
+
+fn create_worker_handle(
+    worker_id: usize,
+    rx_worker: Receiver<String>,
+    secret_content: Vec<u8>,
+    crc32: u32,
+    password_counter: Arc<AtomicU64>,
+    password_found: Arc<AtomicBool>,
+    shutdown_signal: Arc<AtomicBool>,
+    found_password: Arc<Mutex<String>>,
+    decrypted_content: Arc<Mutex<Vec<u8>>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        println!("Worker {} started.", worker_id);
+        // The loop will automatically break when the sender is dropped and the channel is empty.
+        while let Ok(password) = rx_worker.recv() {
+            // Check for shutdown signal before processing
+            if shutdown_signal.load(Ordering::Relaxed) {
+                println!("Worker {} received shutdown signal.", worker_id);
+                break;
+            }
+
+            if password_found.load(Ordering::Relaxed) {
+                println!("Worker {} received found signal.", worker_id);
+                break;
+            }
+
+            // Increment counter when we actually TRY the password
+            password_counter.fetch_add(1, Ordering::Relaxed);
+
+            if crate::utils::zip::verify_zip_crypto_password(&secret_content, &password, crc32) {
+                println!("Found password: {}", password);
+
+                // Decrypt the file content
+                let decrypted =
+                    crate::utils::zip::decrypt_zip_crypto_content(&secret_content, &password);
+
+                // Store the password and decrypted content
+                if let Ok(mut pwd) = found_password.lock() {
+                    *pwd = password.clone();
+                }
+                if let Ok(mut content_guard) = decrypted_content.lock() {
+                    *content_guard = decrypted;
+                }
+
+                password_found.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+        println!("Worker {} finished.", worker_id);
+    })
+}
+
 pub fn run() {
     let client = crate::utils::hackattic_client::HackatticClient::new("brute_force_zip");
 
@@ -121,50 +224,13 @@ pub fn run() {
         }
     });
 
-    // Spawn a producer thread
-    let found_flag_producer = Arc::clone(&password_found);
-    let shutdown_signal_producer = Arc::clone(&shutdown_signal);
-    thread::spawn(move || {
-        println!("Password generator thread started.");
-        for length in 4..=6 {
-            println!("Generating passwords of length {}", length);
-            let mut indices = vec![0; length];
-
-            loop {
-                // Check if password was found or shutdown signal received
-                if found_flag_producer.load(Ordering::Relaxed)
-                    || shutdown_signal_producer.load(Ordering::Relaxed)
-                {
-                    println!("Stopping generator (password found or shutdown signal received).");
-                    break;
-                }
-
-                let password: String = indices.iter().map(|&i| charset[i]).collect();
-                // Send password to main thread
-                if tx_main.send(password.clone()).is_err() {
-                    // Channel closed, workers are done
-                    break;
-                }
-
-                // Increment indices (like base-36 counter)
-                let mut pos = length as isize - 1;
-                while pos >= 0 {
-                    indices[pos as usize] += 1;
-                    if indices[pos as usize] < charset.len() {
-                        break;
-                    }
-                    indices[pos as usize] = 0;
-                    pos -= 1;
-                }
-                if pos < 0 {
-                    break; // finished all passwords of this length
-                }
-            }
-            println!("Finished generating passwords of length {}", length);
-        }
-        // Dropping the sender signals that no more messages will be sent.
-        drop(tx_main);
-    });
+    // Spawn password generator thread
+    spawn_password_generator(
+        charset.clone(),
+        tx_main,
+        Arc::clone(&password_found),
+        Arc::clone(&shutdown_signal),
+    );
 
     let mut handles = vec![];
     let num_workers = num_cpus::get() - 1;
@@ -173,51 +239,17 @@ pub fn run() {
     for i in 0..num_workers {
         // Clone the receiver for each worker
         let rx_worker = rx_main.clone();
-        let content = secret_content.clone();
-        let counter_worker = Arc::clone(&password_counter);
-        let found_flag_worker = Arc::clone(&password_found);
-        let shutdown_signal_worker = Arc::clone(&shutdown_signal);
-        let found_password_worker = Arc::clone(&found_password);
-        let decrypted_content_worker = Arc::clone(&decrypted_content);
-        let handle = thread::spawn(move || {
-            println!("Worker {} started.", i);
-            // The loop will automatically break when the sender is dropped and the channel is empty.
-            while let Ok(password) = rx_worker.recv() {
-                // Check for shutdown signal before processing
-                if shutdown_signal_worker.load(Ordering::Relaxed) {
-                    println!("Worker {} received shutdown signal.", i);
-                    break;
-                }
-
-                if found_flag_worker.load(Ordering::Relaxed) {
-                    println!("Worker {} received found signal.", i);
-                    break;
-                }
-
-                // Increment counter when we actually TRY the password
-                counter_worker.fetch_add(1, Ordering::Relaxed);
-
-                if crate::utils::zip::verify_zip_crypto_password(&content, &password, crc32) {
-                    println!("Found password: {}", password);
-
-                    // Decrypt the file content
-                    let decrypted =
-                        crate::utils::zip::decrypt_zip_crypto_content(&content, &password);
-
-                    // Store the password and decrypted content
-                    if let Ok(mut pwd) = found_password_worker.lock() {
-                        *pwd = password.clone();
-                    }
-                    if let Ok(mut content_guard) = decrypted_content_worker.lock() {
-                        *content_guard = decrypted;
-                    }
-
-                    found_flag_worker.store(true, Ordering::Relaxed);
-                    break;
-                }
-            }
-            println!("Worker {} finished.", i);
-        });
+        let handle = create_worker_handle(
+            i,
+            rx_worker,
+            secret_content.clone(),
+            crc32,
+            Arc::clone(&password_counter),
+            Arc::clone(&password_found),
+            Arc::clone(&shutdown_signal),
+            Arc::clone(&found_password),
+            Arc::clone(&decrypted_content),
+        );
         handles.push(handle);
     }
 
