@@ -10,6 +10,7 @@ fn main() {
         "backup_restore" => challenges::backup_restore::run(),
         "brute_force_zip" => challenges::brute_force_zip::run(),
         "mini_miner" => challenges::mini_miner::run(),
+        "tales_of_ssl" => challenges::tales_of_ssl::run(),
         _ => panic!("Unknown challenge"),
     }
 }
