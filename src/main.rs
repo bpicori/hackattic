@@ -11,6 +11,7 @@ fn main() {
         "brute_force_zip" => challenges::brute_force_zip::run(),
         "mini_miner" => challenges::mini_miner::run(),
         "tales_of_ssl" => challenges::tales_of_ssl::run(),
+        "jotting_jwts" => challenges::jotting_jwts::run(),
         _ => panic!("Unknown challenge"),
     }
 }

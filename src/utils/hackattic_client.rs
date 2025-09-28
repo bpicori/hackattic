@@ -21,7 +21,6 @@ impl HackatticClient {
         }
     }
 
-    /// Get the problem data from the Hackattic API
     pub fn get_problem(&self) -> serde_json::Value {
         let url = format!(
             "{}/{}/problem?access_token={}",
@@ -34,7 +33,20 @@ impl HackatticClient {
             .expect("Failed to parse JSON")
     }
 
-    /// Submit a solution to the Hackattic API
+    pub async fn get_problem_async(&self) -> serde_json::Value {
+        let url = format!(
+            "{}/{}/problem?access_token={}",
+            BASE_URL, self.challenge_name, self.access_token
+        );
+
+        reqwest::get(&url)
+            .await
+            .expect("Failed to fetch problem")
+            .json::<serde_json::Value>()
+            .await
+            .expect("Failed to parse JSON")
+    }
+
     pub fn submit_solution(&self, solution: serde_json::Value) {
         let url = format!(
             "{}/{}/solve?access_token={}",
@@ -49,6 +61,23 @@ impl HackatticClient {
 
         let status = resp.status();
         let text = resp.text().expect("Failed to read response body");
+        println!("Status: {}", status);
+        println!("Response: {}", text);
+    }
+
+    pub async fn submit_solution_async(&self, solution: serde_json::Value) {
+        let url = format!(
+            "{}/{}/solve?access_token={}",
+            BASE_URL, self.challenge_name, self.access_token
+        );
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .json(&solution)
+            .send()
+            .await
+            .expect("Failed to send POST");
+        let status = resp.status();
+        let text = resp.text().await.expect("Failed to read response body");
         println!("Status: {}", status);
         println!("Response: {}", text);
     }

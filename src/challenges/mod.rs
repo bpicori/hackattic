@@ -4,3 +4,4 @@ pub mod backup_restore;
 pub mod brute_force_zip;
 pub mod mini_miner;
 pub mod tales_of_ssl;
+pub mod jotting_jwts;
