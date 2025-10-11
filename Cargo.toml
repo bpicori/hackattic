@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+opencv = { version = "0.96.0", features = ["clang-runtime"] }
 base64 = "0.22.1"
 sha2 = "0.10.9"
 pbkdf2 = "0.12.2"
