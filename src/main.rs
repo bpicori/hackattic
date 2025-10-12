@@ -13,6 +13,7 @@ fn main() {
         "tales_of_ssl" => challenges::tales_of_ssl::run(),
         "jotting_jwts" => challenges::jotting_jwts::run(),
         "basic_face_detection" => challenges::basic_face_detection::run(),
+        "visual_basic_math" => challenges::visual_basic_math::run(),
         _ => panic!("Unknown challenge"),
     }
 }

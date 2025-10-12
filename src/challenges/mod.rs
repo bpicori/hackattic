@@ -6,3 +6,4 @@ pub mod mini_miner;
 pub mod tales_of_ssl;
 pub mod jotting_jwts;
 pub mod basic_face_detection;
+pub mod visual_basic_math;
