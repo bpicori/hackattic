@@ -14,6 +14,7 @@ fn main() {
         "jotting_jwts" => challenges::jotting_jwts::run(),
         "basic_face_detection" => challenges::basic_face_detection::run(),
         "visual_basic_math" => challenges::visual_basic_math::run(),
+        "collision_course" => challenges::collision_course::run(),
         _ => panic!("Unknown challenge"),
     }
 }

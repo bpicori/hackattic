@@ -20,3 +20,12 @@ pip install paddlepaddle paddleocr
 ```bash
 paddleocr ocr -i ./data/math_2.jpeg --use_doc_orientation_classify False --use_doc_unwarping False --use_textline_orientation False --rec_char_dict_path --save_path ./output
 ```
+
+## COLLISION COURSE CHALLENGE
+
+* find collision md5 tool -> <https://github.com/brimstone/fastcoll>
+* example command
+
+```bash
+
+```
