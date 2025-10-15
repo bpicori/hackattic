@@ -27,5 +27,5 @@ paddleocr ocr -i ./data/math_2.jpeg --use_doc_orientation_classify False --use_d
 * example command
 
 ```bash
-
+ docker run --rm -it -v $PWD:/work -w /work -u $UID:$GID brimstone/fastcoll --prefixfile ./data/input.txt -o ./data/file1.bin ./data/file2.bin
 ```

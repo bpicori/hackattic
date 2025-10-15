@@ -15,6 +15,7 @@ fn main() {
         "basic_face_detection" => challenges::basic_face_detection::run(),
         "visual_basic_math" => challenges::visual_basic_math::run(),
         "collision_course" => challenges::collision_course::run(),
+        "reading_qr" => challenges::reading_qr::run(),
         _ => panic!("Unknown challenge"),
     }
 }
