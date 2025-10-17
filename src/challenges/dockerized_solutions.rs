@@ -1,221 +1,327 @@
+use bytes::Bytes;
 use std::collections::HashMap;
-use std::io::Result;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tokio::fs;
-
 use uuid::Uuid;
-use warp::Filter;
-use warp::path;
+use warp::{Filter, http::StatusCode, reply};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct BlobInfo {
-    pub digest: String,
-    pub size: u64,
-    pub media_type: String,
-    pub path: PathBuf,
+// Single storage struct to handle all registry operations
+#[derive(Clone)]
+struct RegistryStorage {
+    root: PathBuf,
+    uploads: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+    blobs: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+    manifests: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct Manifest {
-    schema_version: String,
-    media_type: String,
-    config: String,
-    layers: Vec<BlobInfo>,
-}
-
-struct Repository {
-    name: String,
-    tags: HashMap<String, String>, // map tag => manifest digest
-}
-
-struct BlobStore {
-    base_path: PathBuf,
-    blobs: RwLock<HashMap<String, BlobInfo>>,
-}
-
-impl BlobStore {
-    pub fn new(base_path: PathBuf) -> Self {
+impl RegistryStorage {
+    fn new(root: PathBuf) -> Self {
         Self {
-            base_path,
-            blobs: RwLock::new(HashMap::new()),
+            root,
+            uploads: Arc::new(RwLock::new(HashMap::new())),
+            blobs: Arc::new(RwLock::new(HashMap::new())),
+            manifests: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    pub async fn store_blob(
-        &self,
-        repo: &str,
-        digest: &str,
-        data: &[u8],
-        media_type: &str,
-    ) -> Result<BlobInfo> {
-        let repo_path = self.base_path.join(repo).join("blobs/sha256");
-        fs::create_dir_all(&repo_path).await?;
+    fn init_upload(&self) -> String {
+        let uuid = Uuid::new_v4().to_string();
+        self.uploads
+            .write()
+            .unwrap()
+            .insert(uuid.clone(), Vec::new());
+        uuid
+    }
 
-        let filename = digest.strip_prefix("sha256:").unwrap_or(digest);
-        let blob_path = repo_path.join(filename);
-        fs::write(&blob_path, data).await?;
+    fn append_to_upload(&self, uuid: &str, data: &[u8]) -> Result<(), String> {
+        let mut uploads = self.uploads.write().unwrap();
+        if let Some(buffer) = uploads.get_mut(uuid) {
+            buffer.extend_from_slice(data);
+            Ok(())
+        } else {
+            Err("Upload not found".to_string())
+        }
+    }
 
-        let info = BlobInfo {
-            digest: digest.to_string(),
-            size: data.len() as u64,
-            media_type: media_type.to_string(),
-            path: blob_path.clone(),
+    async fn complete_upload(&self, uuid: &str, digest: &str, repo: &str) -> Result<(), String> {
+        let data = {
+            let mut uploads = self.uploads.write().unwrap();
+            uploads.remove(uuid).ok_or("Upload not found")?
         };
 
         self.blobs
             .write()
             .unwrap()
-            .insert(digest.to_string(), info.clone());
+            .insert(digest.to_string(), data.clone());
 
-        Ok(info)
-    }
+        let blob_dir = self.root.join(repo).join("blobs").join("sha256");
+        fs::create_dir_all(&blob_dir)
+            .await
+            .map_err(|e| e.to_string())?;
 
-    pub async fn get_blob(&self, repo: &str, digest: &str) -> Result<Vec<u8>> {
         let filename = digest.strip_prefix("sha256:").unwrap_or(digest);
-        let blob_path = self
-            .base_path
-            .join(repo)
-            .join("blobs/sha256")
-            .join(filename);
-        Ok(fs::read(&blob_path).await?)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct FileStorage {
-    root: PathBuf,
-}
-
-impl FileStorage {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
-    }
-
-    fn upload_path(&self, uuid: &str) -> PathBuf {
-        self.root.join("uploads").join(uuid)
-    }
-
-    async fn init_upload(&self) -> Result<String> {
-        let uuid = Uuid::new_v4().to_string();
-        let path = self.upload_path(&uuid);
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        fs::File::create(&path).await?;
-        Ok(uuid)
-    }
-
-    async fn append_chunk(&self, uuid: &str, data: &[u8]) -> Result<()> {
-        let path = self.upload_path(uuid);
-
-        fs::write(path, data).await?;
+        let blob_path = blob_dir.join(filename);
+        fs::write(&blob_path, &data)
+            .await
+            .map_err(|e| e.to_string())?;
 
         Ok(())
     }
+
+    fn get_blob(&self, digest: &str) -> Option<Vec<u8>> {
+        self.blobs.read().unwrap().get(digest).cloned()
+    }
+
+    fn blob_exists(&self, digest: &str) -> bool {
+        self.blobs.read().unwrap().contains_key(digest)
+    }
+
+    fn store_manifest(&self, repo: &str, reference: &str, data: Vec<u8>) {
+        let key = format!("{}:{}", repo, reference);
+        self.manifests.write().unwrap().insert(key, data);
+    }
+
+    fn get_manifest(&self, repo: &str, reference: &str) -> Option<Vec<u8>> {
+        let key = format!("{}:{}", repo, reference);
+        self.manifests.read().unwrap().get(&key).cloned()
+    }
 }
 
-fn build_upload_route(
-    storage: FileStorage,
-) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
-    let upload_route = path!("v2" / String / "blobs" / "uploads");
+// API handlers - organized under RegistryApi struct
+struct RegistryApi;
 
-    let storage = Arc::new(storage);
-    let storage_filter = warp::any().map(move || Arc::clone(&storage));
+impl RegistryApi {
+    fn with_storage(
+        storage: RegistryStorage,
+    ) -> impl Filter<Extract = (RegistryStorage,), Error = std::convert::Infallible> + Clone {
+        warp::any().map(move || storage.clone())
+    }
 
-    let upload_handler = |repo: String, storage: Arc<FileStorage>| async move {
-        println!("--- Incoming POST Request ---");
-        println!("Repository: {}", repo);
+    fn version_check() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("v2").and(warp::get()).map(|| {
+            reply::with_header(
+                reply::json(&serde_json::json!({})),
+                "Docker-Distribution-API-Version",
+                "registry/2.0",
+            )
+        })
+    }
 
-        let uuid = match storage.init_upload().await {
-            Ok(uuid) => uuid,
-            Err(e) => {
-                return Err(warp::reject::reject());
-            }
-        };
+    fn start_upload(
+        storage: RegistryStorage,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("v2" / String / "blobs" / "uploads")
+            .and(warp::post())
+            .and(Self::with_storage(storage))
+            .map(|repo: String, storage: RegistryStorage| {
+                println!("POST /v2/{}/blobs/uploads/", repo);
+                let uuid = storage.init_upload();
+                let location = format!("/v2/{}/blobs/uploads/{}", repo, uuid);
 
-        Ok::<_, warp::Rejection>(warp::reply::with_status(
-            warp::reply::json(&HashMap::from([
-                ("Location", format!("/v2/{}/blobs/uploads/{}", repo, uuid)),
-                ("Docker-Upload-UUID", uuid),
-                ("Range", "0-0".to_owned()),
-            ])),
-            warp::http::StatusCode::ACCEPTED,
-        ))
-    };
+                reply::with_status(
+                    reply::with_header(
+                        reply::with_header("", "Location", location),
+                        "Docker-Upload-UUID",
+                        uuid,
+                    ),
+                    StatusCode::ACCEPTED,
+                )
+            })
+    }
 
-    return warp::post()
-        .and(upload_route)
-        .and(storage_filter)
-        .and_then(upload_handler);
-}
+    fn upload_chunk(
+        storage: RegistryStorage,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("v2" / String / "blobs" / "uploads" / String)
+            .and(warp::patch())
+            .and(warp::body::bytes())
+            .and(Self::with_storage(storage))
+            .map(
+                |repo: String, uuid: String, body: Bytes, storage: RegistryStorage| {
+                    println!(
+                        "PATCH /v2/{}/blobs/uploads/{} ({} bytes)",
+                        repo,
+                        uuid,
+                        body.len()
+                    );
 
-fn build_upload_chunk_route(
-    storage: FileStorage,
-) -> impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
-    let upload_chunk_route = path!("v2" / String / "blobs" / "uploads" / String);
+                    match storage.append_to_upload(&uuid, &body) {
+                        Ok(_) => {
+                            let location = format!("/v2/{}/blobs/uploads/{}", repo, uuid);
+                            reply::with_status(
+                                reply::with_header("", "Location", location),
+                                StatusCode::ACCEPTED,
+                            )
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            reply::with_status(
+                                reply::with_header("", "Location", ""),
+                                StatusCode::NOT_FOUND,
+                            )
+                        }
+                    }
+                },
+            )
+    }
 
-    let chunk_query_param = warp::query::<HashMap<String, String>>();
+    fn complete_upload(
+        storage: RegistryStorage,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("v2" / String / "blobs" / "uploads" / String)
+            .and(warp::put())
+            .and(warp::query::<HashMap<String, String>>())
+            .and(warp::body::bytes())
+            .and(Self::with_storage(storage))
+            .and_then(
+                |repo: String,
+                 uuid: String,
+                 query: HashMap<String, String>,
+                 body: Bytes,
+                 storage: RegistryStorage| async move {
+                    println!("PUT /v2/{}/blobs/uploads/{}", repo, uuid);
 
-    let storage = Arc::new(storage);
-    let storage_filter = warp::any().map(move || Arc::clone(&storage));
+                    if !body.is_empty() {
+                        if let Err(e) = storage.append_to_upload(&uuid, &body) {
+                            eprintln!("Error: {}", e);
+                        }
+                    }
 
-    let upload_chunk_handler = |repo: String,
-                                uuid: String,
-                                query: HashMap<String, String>,
-                                body: warp::hyper::body::Bytes,
-                                storage: Arc<FileStorage>| async move {
-        println!("--- Incoming PATCH Request ---");
-        println!("Repository: {}", repo);
-        println!("Upload UUID: {}", uuid);
-        println!("Received chunk size: {} bytes", body.len());
-        println!("Query: {:?}", query);
+                    if let Some(digest) = query.get("digest") {
+                        match storage.complete_upload(&uuid, digest, &repo).await {
+                            Ok(_) => {
+                                let location = format!("/v2/{}/blobs/{}", repo, digest);
+                                Ok::<_, warp::Rejection>(reply::with_status(
+                                    reply::with_header(
+                                        reply::with_header("", "Location", location),
+                                        "Docker-Content-Digest",
+                                        digest.clone(),
+                                    ),
+                                    StatusCode::CREATED,
+                                ))
+                            }
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                                Ok::<_, warp::Rejection>(reply::with_status(
+                                    reply::with_header(
+                                        reply::with_header("", "Location", ""),
+                                        "Docker-Content-Digest",
+                                        "",
+                                    ),
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                ))
+                            }
+                        }
+                    } else {
+                        Ok::<_, warp::Rejection>(reply::with_status(
+                            reply::with_header(
+                                reply::with_header("", "Location", ""),
+                                "Docker-Content-Digest",
+                                "",
+                            ),
+                            StatusCode::BAD_REQUEST,
+                        ))
+                    }
+                },
+            )
+    }
 
-        if let Err(e) = storage.append_chunk(&uuid, &body).await {
-            eprintln!("Error appending chunk: {:?}", e);
-            return Err(warp::reject::reject());
-        }
+    fn check_blob(
+        storage: RegistryStorage,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("v2" / String / "blobs" / String)
+            .and(warp::head())
+            .and(Self::with_storage(storage))
+            .map(|repo: String, digest: String, storage: RegistryStorage| {
+                println!("HEAD /v2/{}/blobs/{}", repo, digest);
 
-        println!("Chunk appended successfully");
+                if storage.blob_exists(&digest) {
+                    reply::with_status(
+                        reply::with_header("", "Docker-Content-Digest", digest),
+                        StatusCode::OK,
+                    )
+                } else {
+                    reply::with_status(
+                        reply::with_header("", "Docker-Content-Digest", ""),
+                        StatusCode::NOT_FOUND,
+                    )
+                }
+            })
+    }
 
-        let digest = query.get("digest");
+    fn get_blob(
+        storage: RegistryStorage,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("v2" / String / "blobs" / String)
+            .and(warp::get())
+            .and(Self::with_storage(storage))
+            .map(|repo: String, digest: String, storage: RegistryStorage| {
+                println!("GET /v2/{}/blobs/{}", repo, digest);
 
-        if digest.is_some(){
-            println!("Digest: {}", digest.unwrap());
-        }
+                if let Some(data) = storage.get_blob(&digest) {
+                    reply::with_status(
+                        reply::with_header(data, "Docker-Content-Digest", digest),
+                        StatusCode::OK,
+                    )
+                } else {
+                    reply::with_status(
+                        reply::with_header(Vec::new(), "Docker-Content-Digest", ""),
+                        StatusCode::NOT_FOUND,
+                    )
+                }
+            })
+    }
 
-        
+    fn put_manifest(
+        storage: RegistryStorage,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("v2" / String / "manifests" / String)
+            .and(warp::put())
+            .and(warp::body::bytes())
+            .and(Self::with_storage(storage))
+            .map(
+                |repo: String, reference: String, body: Bytes, storage: RegistryStorage| {
+                    println!("PUT /v2/{}/manifests/{}", repo, reference);
+                    storage.store_manifest(&repo, &reference, body.to_vec());
+                    reply::with_status("", StatusCode::CREATED)
+                },
+            )
+    }
 
-        Ok::<_, warp::Rejection>(warp::reply::with_status(
-            warp::reply::json(&HashMap::from([
-                ("Location", format!("/v2/{}/blobs/uploads/{}", repo, uuid)),
-                ("Docker-Upload-UUID", uuid),
-                ("Range", "0-0".to_owned()),
-            ])),
-            warp::http::StatusCode::ACCEPTED,
-        ))
-    };
+    fn get_manifest(
+        storage: RegistryStorage,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("v2" / String / "manifests" / String)
+            .and(warp::get())
+            .and(Self::with_storage(storage))
+            .map(
+                |repo: String, reference: String, storage: RegistryStorage| {
+                    println!("GET /v2/{}/manifests/{}", repo, reference);
 
-    return warp::patch()
-        .and(upload_chunk_route)
-        .and(chunk_query_param)
-        .and(warp::body::bytes())
-        .and(storage_filter)
-        .and_then(upload_chunk_handler);
+                    if let Some(data) = storage.get_manifest(&repo, &reference) {
+                        reply::with_status(data, StatusCode::OK)
+                    } else {
+                        reply::with_status(Vec::new(), StatusCode::NOT_FOUND)
+                    }
+                },
+            )
+    }
 }
 
 #[tokio::main]
 pub async fn run() {
-    let storage = FileStorage::new("./data/docker-registry");
+    let storage = RegistryStorage::new(PathBuf::from("./data/registry_data"));
 
-    let upload_route = build_upload_route(storage.clone());
-    let upload_chunk_route = build_upload_chunk_route(storage);
+    let routes = RegistryApi::version_check()
+        .or(RegistryApi::start_upload(storage.clone()))
+        .or(RegistryApi::upload_chunk(storage.clone()))
+        .or(RegistryApi::complete_upload(storage.clone()))
+        .or(RegistryApi::check_blob(storage.clone()))
+        .or(RegistryApi::get_blob(storage.clone()))
+        .or(RegistryApi::put_manifest(storage.clone()))
+        .or(RegistryApi::get_manifest(storage));
 
-    let app_routes = upload_route.or(upload_chunk_route);
-
-    println!("Starting server on http://127.0.0.1:3030");
-    warp::serve(app_routes).run(([127, 0, 0, 1], 3030)).await;
+    println!("Starting Docker Registry on http://0.0.0.0:3030");
+    warp::serve(routes).run(([0, 0, 0, 0], 3030)).await;
 }

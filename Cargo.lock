@@ -716,6 +716,7 @@ name = "hackattic"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "crossbeam-channel",
  "ctrlc",
  "dotenv",
