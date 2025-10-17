@@ -28,3 +28,4 @@ jsonwebtoken = "9.3.1"
 tokio = { version = "1.0", features = ["full"] }
 rqrr = "0.10.0"
 image = "0.25.8"
+uuid = { version = "1.18.1", features = ["v4"] }

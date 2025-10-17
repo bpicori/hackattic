@@ -9,3 +9,4 @@ pub mod basic_face_detection;
 pub mod visual_basic_math;
 pub mod collision_course;
 pub mod reading_qr;
+pub mod dockerized_solutions;

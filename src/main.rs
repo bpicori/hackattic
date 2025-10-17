@@ -16,6 +16,7 @@ fn main() {
         "visual_basic_math" => challenges::visual_basic_math::run(),
         "collision_course" => challenges::collision_course::run(),
         "reading_qr" => challenges::reading_qr::run(),
+        "dockerized_solutions" => challenges::dockerized_solutions::run(),
         _ => panic!("Unknown challenge"),
     }
 }
